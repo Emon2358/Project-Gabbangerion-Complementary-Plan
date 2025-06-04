@@ -2,50 +2,48 @@ name: Project-Gabbangerion-Complementary-Plan
 
 on:
   workflow_dispatch:
+    inputs:
+      manual_urls:
+        description: '手動で再試行したい .ra ファイルの URL をカンマ区切りで入力してください（省略または空文字で自動収集のみ）'
+        required: false
+        default: ''  # デフォルト空 → 自動収集のみ実行
 
 jobs:
   download_convert:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. リポジトリをチェックアウト（persist-credentials: true により push 権限も維持される）
       - name: Checkout repository
         uses: actions/checkout@v3
         with:
           persist-credentials: true
           fetch-depth: 0
 
-      # 2. Python セットアップ
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.x"
 
-      # 3. Python ライブラリ（requests, beautifulsoup4）をインストール
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4
 
-      # 4. ffmpeg をインストール（Ubuntu 環境で apt を使う）
       - name: Install FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      # 5. スクリプトを実行して .ra をダウンロード → FLAC に変換
       - name: Download and convert RA files
         run: |
-          python scripts/download_and_convert.py
+          # 手動 URL 入力を --manual-urls 引数に渡す
+          python scripts/download_and_convert.py --manual-urls "${{ github.event.inputs.manual_urls }}"
 
-      # 6. git ユーザー設定＆コミット → プッシュ
       - name: Commit and push FLAC files
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add flac_files/*.flac
-
+          git add flac_files/*.flac || true
           if git diff-index --quiet HEAD; then
             echo "No changes to commit"
           else
