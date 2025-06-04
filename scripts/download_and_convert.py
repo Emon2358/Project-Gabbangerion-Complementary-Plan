@@ -2,12 +2,12 @@
 import os
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 import subprocess
 import time
 
 # -----------------------------------------------
-# ※「frac」とありますが、ここでは一般的な可逆圧縮フォーマットである FLAC（.flac）に変換するものと仮定します。
+# ※「frac」とありますが、本例では可逆圧縮フォーマットとして一般的な FLAC（.flac）に変換します。
 # -----------------------------------------------
 
 # 変換対象ページのリスト
@@ -30,7 +30,34 @@ RETRY_WAIT_SEC = 5
 os.makedirs(RA_DIR, exist_ok=True)
 os.makedirs(FLAC_DIR, exist_ok=True)
 
-# ページから抽出した .ra の URL を一意に保持するためのセット
+# Archive URL からタイムスタンプとオリジナルのベース URL を抽出する関数
+def parse_archive_base(page_url):
+    """
+    例:
+       page_url = "https://web.archive.org/web/19970807011832/http://www.mahoroba.or.jp/~nakagami/music/cd.html"
+       → ts = "19970807011832"
+       → orig_base = "http://www.mahoroba.or.jp"
+    """
+    parsed = urlparse(page_url)
+    # parsed.path は "/web/19970807011832/http://www.mahoroba.or.jp/~nakagami/music/cd.html"
+    parts = parsed.path.split("/", 4)
+    # parts = ['', 'web', '19970807011832', 'http:', 'www.mahoroba.or.jp/~nakagami/music/cd.html']
+    if len(parts) < 5:
+        return None, None
+    ts = parts[2]  # "19970807011832"
+    # オリジナル URL（"http://www.mahoroba.or.jp/~nakagami/music/cd.html"）
+    orig_full = parts[3] + "//" + parts[4]  # "http://" + "www.mahoroba.or.jp/~nakagami/music/cd.html"
+    # orig_full を parse してベースドメイン + パスの親ディレクトリを得る
+    parsed_orig = urlparse(orig_full)
+    # ベースドメイン: "http://www.mahoroba.or.jp"
+    orig_domain = f"{parsed_orig.scheme}://{parsed_orig.netloc}"
+    # オリジナルページのディレクトリ: たとえば "/~nakagami/music/"
+    orig_dir = os.path.dirname(parsed_orig.path) + "/"
+    # 結合して、「http://www.mahoroba.or.jp/~nakagami/music/」
+    orig_base = orig_domain + orig_dir
+    return ts, orig_base
+
+# PAGE_URLS ごとに .ra の絶対元 URL を取得し、Archive URL 化してセットに格納
 ra_urls = set()
 
 for page_url in PAGE_URLS:
@@ -41,34 +68,50 @@ for page_url in PAGE_URLS:
         print(f"[Warning] Failed to fetch page {page_url}: {e}")
         continue
 
+    # ページからタイムスタンプとオリジナルベースを取得
+    ts, orig_base = parse_archive_base(page_url)
+    if ts is None or orig_base is None:
+        print(f"[Warning] Could not parse archive base from {page_url}")
+        continue
+
     soup = BeautifulSoup(resp.text, "html.parser")
     for a_tag in soup.find_all("a", href=True):
         href = a_tag["href"]
-        # リンクの末尾が .ra ならば処理対象
-        if href.lower().endswith(".ra"):
-            # urljoin で完全な URL に変換。ただし Archive のリライトが不正になっている場合でも、
-            # requests.get で試せるように元のままの href も併記しておく
-            full_url = urljoin(page_url, href)
-            ra_urls.add(full_url)
 
-print(f"Found {len(ra_urls)} .ra URLs.")
+        # まず「.ra」で終わっているかチェック
+        if not href.lower().endswith(".ra"):
+            continue
 
+        # --- 1) 元の絶対 URL を作る ---
+        if href.startswith("http://") or href.startswith("https://"):
+            orig_url = href
+        else:
+            # たとえば href が "../ra/do_you.ra" のような相対パスの場合
+            orig_url = urljoin(orig_base, href)
+
+        # --- 2) Archive URL に組み立てる ---
+        # 例: "https://web.archive.org/web/19970807011832/http://www.mahoroba.or.jp/~nakagami/music/ra/do_you.ra"
+        archive_url = f"https://web.archive.org/web/{ts}/{orig_url}"
+        ra_urls.add(archive_url)
+
+print(f"Found {len(ra_urls)} .ra URLs (archive-wrapped).")
+
+# 以降は既存の「ダウンロード → FLAC 変換 → .ra 削除」のロジック
 for url in ra_urls:
     filename = os.path.basename(url)
     if not filename.lower().endswith(".ra"):
-        # 万が一パスが .ra で終わらない場合もスキップ
         continue
 
     local_ra_path = os.path.join(RA_DIR, filename)
     flac_filename = os.path.splitext(filename)[0] + ".flac"
     flac_path = os.path.join(FLAC_DIR, flac_filename)
 
-    # 既に .flac 化済みの場合は最初からスキップ
+    # 既に .flac 化済みならスキップ
     if os.path.exists(flac_path):
         print(f"[Exists] {flac_filename}, skip entire process.")
         continue
 
-    # ダウンロード済みの .ra があればリダウンロードせずに進む
+    # ダウンロード処理
     if not os.path.exists(local_ra_path):
         success = False
         for attempt in range(1, MAX_RETRIES + 1):
@@ -96,15 +139,14 @@ for url in ra_urls:
     else:
         print(f"[Exists] {filename}, skip download.")
 
-    # .ra が存在しない or ダウンロードに失敗していないか再チェック
+    # .ra が存在しない場合はスキップ
     if not os.path.exists(local_ra_path):
         print(f"[Missing] {filename}, nothing to convert.")
         continue
 
-    # FLAC 変換
+    # FLAC 変換（ログを抑制）
     try:
         print(f"[Converting] {filename} → {flac_filename}")
-        # FFmpeg の出力を完全に捨てる
         subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", local_ra_path, "-c:a", "flac", flac_path, "-y"],
             check=True,
@@ -114,7 +156,7 @@ for url in ra_urls:
         print(f"[Converted] {filename} → {flac_filename}")
     except subprocess.CalledProcessError:
         print(f"[Error] Conversion failed for {filename}, skip.")
-        # 変換失敗時は .ra を残しておく場合は以下をコメントアウト
+        # 変換失敗時は .ra を残置するか削除するか選べます。以下は「削除しておく」例：
         if os.path.exists(local_ra_path):
             try:
                 os.remove(local_ra_path)
@@ -122,7 +164,7 @@ for url in ra_urls:
                 pass
         continue
 
-    # 変換成功したら元の .ra を削除
+    # 変換成功 → .ra を削除
     try:
         os.remove(local_ra_path)
         print(f"[Removed] {filename}")
