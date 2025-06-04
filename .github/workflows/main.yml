@@ -1,6 +1,5 @@
 name: Project-Gabbangerion-Complementary-Plan
 
-# 手動トリガー（必要に応じて schedule や push イベントに変更可能）
 on:
   workflow_dispatch:
 
@@ -9,8 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. リポジトリをチェックアウト（persist-credentials: true により
-      #    push 権限も維持される）
+      # 1. リポジトリをチェックアウト（persist-credentials: true により push 権限も維持される）
       - name: Checkout repository
         uses: actions/checkout@v3
         with:
@@ -24,27 +22,30 @@ jobs:
           python-version: "3.x"
 
       # 3. Python ライブラリ（requests, beautifulsoup4）をインストール
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4
 
-      # 4. スクリプトを実行して .ra をダウンロード → FLAC に変換
+      # 4. ffmpeg をインストール（Ubuntu 環境で apt を使う）
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      # 5. スクリプトを実行して .ra をダウンロード → FLAC に変換
       - name: Download and convert RA files
         run: |
           python scripts/download_and_convert.py
 
-      # 5. git ユーザー設定＆コミット → プッシュ
+      # 6. git ユーザー設定＆コミット → プッシュ
       - name: Commit and push FLAC files
         run: |
-          # GitHub Actions の bot 用設定
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-          # flac_files フォルダ内の .flac をステージング
           git add flac_files/*.flac
 
-          # 差分がなければ何もしない
           if git diff-index --quiet HEAD; then
             echo "No changes to commit"
           else
